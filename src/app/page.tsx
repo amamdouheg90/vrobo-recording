@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { fetchMylerzBrands, MylerzBrand, checkTableExists, supabase } from '@/utils/supabase';
+import { MylerzBrand } from '@/utils/supabase';
 import VoiceRecorder from '@/components/VoiceRecorder';
 
 export default function Home() {
@@ -17,21 +17,30 @@ export default function Home() {
 
   async function loadBrands() {
     try {
-      console.log('Checking Supabase setup...');
+      console.log('Checking Supabase setup via API...');
+      setIsLoading(true);
 
-      // Check if table exists
-      const exists = await checkTableExists();
+      // Check if Supabase is properly configured
+      const checkResponse = await fetch('/api/check/supabase');
+      const checkData = await checkResponse.json();
 
-      if (!exists) {
-        setError('The "mylerzbrands" table does not exist in your Supabase project.');
+      if (!checkData.success) {
+        setError(`Supabase connection error: ${checkData.message}`);
         setIsLoading(false);
         return;
       }
 
-      console.log('Fetching brands...');
-      const brandsData = await fetchMylerzBrands();
+      // Fetch brands using API route instead of direct Supabase client
+      console.log('Fetching brands from API...');
+      const brandsResponse = await fetch('/api/brands');
+      const brandsData = await brandsResponse.json();
+
+      if (!brandsResponse.ok) {
+        throw new Error(brandsData.message || 'Failed to fetch brands');
+      }
+
       console.log('Brands data:', brandsData);
-      setBrands(brandsData);
+      setBrands(brandsData.brands || []);
       setIsLoading(false);
     } catch (error) {
       console.error('Error loading brands:', error);
@@ -63,21 +72,20 @@ export default function Home() {
     }
   };
 
-  // Direct fetch test
+  // Test API access
   async function testDirectFetch() {
     try {
-      setDirectFetchResult("Fetching...");
+      setDirectFetchResult("Fetching via API...");
 
-      const { data, error } = await supabase
-        .from('mylerzbrands')
-        .select('*');
+      const response = await fetch('/api/brands');
+      const data = await response.json();
 
-      if (error) {
-        setDirectFetchResult(`Error: ${error.message}`);
+      if (!response.ok) {
+        setDirectFetchResult(`Error: ${data.message || response.statusText}`);
         return;
       }
 
-      setDirectFetchResult(`Success! Found ${data?.length || 0} records: ${JSON.stringify(data)}`);
+      setDirectFetchResult(`Success! Found ${data.brands?.length || 0} brands`);
     } catch (err) {
       setDirectFetchResult(`Exception: ${err instanceof Error ? err.message : String(err)}`);
     }
