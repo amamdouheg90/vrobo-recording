@@ -13,12 +13,16 @@ export function getGoogleCloudStorage(): Storage {
                 credentialsStr = credentialsStr.slice(1, -1);
             }
 
-            // Replace escaped quotes with regular quotes
+            // First unescape any escaped quotes within the JSON content
             credentialsStr = credentialsStr.replace(/\\"/g, '"');
 
-            // Handle potential line breaks in the JSON
-            credentialsStr = credentialsStr.replace(/\\n/g, '');
+            // Handle escaped newlines properly - keep them as actual newlines
+            credentialsStr = credentialsStr.replace(/\\n/g, '\n');
 
+            // Handle any double-escaped characters that might have been introduced by environment variable handling
+            credentialsStr = credentialsStr.replace(/\\\\/g, '\\');
+
+            // Parse the cleaned JSON string
             const credentials = JSON.parse(credentialsStr);
 
             return new Storage({
@@ -26,17 +30,21 @@ export function getGoogleCloudStorage(): Storage {
                 credentials
             });
         } catch (error) {
-            console.error('Error parsing Google credentials JSON:', error);
-            console.error('Credential string format issue, using default authentication');
+            if (error instanceof Error) {
+                console.error('Error parsing Google credentials JSON:', error);
+                console.error('Raw credentials string:', process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+                console.error('Credential string format issue, using default authentication');
 
-            // During build time, return a dummy storage client to avoid build failures
-            if (process.env.NODE_ENV === 'production' && process.env.VERCEL_ENV === 'production') {
-                return new Storage({
-                    projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'dummy-project'
-                });
+                // During build time, return a dummy storage client to avoid build failures
+                if (process.env.NODE_ENV === 'production' && process.env.VERCEL_ENV === 'production') {
+                    return new Storage({
+                        projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'dummy-project'
+                    });
+                }
+
+                throw new Error(`Invalid Google Cloud credentials configuration: ${error.message}`);
             }
-
-            throw new Error('Invalid Google Cloud credentials configuration');
+            throw error; // Re-throw if it's not an Error instance
         }
     }
 
