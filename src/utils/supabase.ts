@@ -1,23 +1,42 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Create a minimal Supabase client for build-time usage
-export const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://example.supabase.co',
-    process.env.SUPABASE_SERVICE_KEY || 'dummy-key-for-build-time'
-);
+// Function to get environment variables at runtime
+const getSupabaseCredentials = () => {
+    // For server-side code, these will be available at runtime
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 
-// Log info only in development
+    // Log missing credentials in non-production
+    if (process.env.NODE_ENV !== 'production') {
+        if (!supabaseUrl) console.error('Missing NEXT_PUBLIC_SUPABASE_URL');
+        if (!supabaseKey) console.error('Missing SUPABASE_SERVICE_KEY');
+    }
+
+    return {
+        url: supabaseUrl || '',
+        key: supabaseKey || '',
+    };
+};
+
+// Create a wrapper function for the Supabase client
+const createSupabaseClient = () => {
+    const { url, key } = getSupabaseCredentials();
+
+    // In runtime, this will use the actual credentials
+    return createClient(url, key);
+};
+
+// Initialize the client (it will be reinitialized at runtime with actual credentials)
+export const supabase = createSupabaseClient();
+
+// Debug info that will only be logged in development
 if (process.env.NODE_ENV === 'development') {
-    console.log('Supabase URL available:', !!process.env.NEXT_PUBLIC_SUPABASE_URL);
-    console.log('Supabase key available:', !!process.env.SUPABASE_SERVICE_KEY);
-
-    if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
-        console.error('Missing Supabase URL. Make sure NEXT_PUBLIC_SUPABASE_URL is set in .env.local');
-    }
-
-    if (!process.env.SUPABASE_SERVICE_KEY) {
-        console.error('Missing Supabase service key. Make sure SUPABASE_SERVICE_KEY is set in .env.local');
-    }
+    console.log('Supabase initialization in development mode');
+    const { url, key } = getSupabaseCredentials();
+    console.log('URL available:', !!url);
+    console.log('Key available:', !!key);
+    console.log('URL starts with:', url.substring(0, 8));
+    console.log('Key length:', key.length);
 }
 
 export interface MylerzBrand {

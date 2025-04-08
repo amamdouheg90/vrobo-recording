@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 import { uploadFileToGCS } from '@/utils/googleStorage';
 import { updateRecordUrl } from '@/utils/supabase';
+import { supabase } from '@/utils/supabase';
 
 // Helper function to send process events via POST to the process-events endpoint
 async function notifyProcessEvent(step: string, error?: string) {
@@ -115,22 +116,29 @@ export async function POST(request: NextRequest) {
 
             // Get the brand data from the database
             console.log('Getting brand data...');
-            const response2 = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/mylerzbrands?id=eq.${brandId}`, {
-                headers: {
-                    'apikey': process.env.SUPABASE_SERVICE_KEY || '',
-                    'Content-Type': 'application/json',
-                    'Prefer': 'return=representation'
-                }
-            });
 
-            if (!response2.ok) {
-                const errorMsg = `Failed to fetch brand data: ${response2.statusText}`;
+            // Log the Supabase connection details for debugging
+            console.log('Supabase URL availability:', !!process.env.NEXT_PUBLIC_SUPABASE_URL);
+            console.log('Supabase key availability:', !!process.env.SUPABASE_SERVICE_KEY);
+            if (process.env.SUPABASE_SERVICE_KEY) {
+                console.log('Supabase key length:', process.env.SUPABASE_SERVICE_KEY.length);
+                console.log('Supabase key starts with:', process.env.SUPABASE_SERVICE_KEY.substring(0, 10));
+            }
+
+            // Use the API from supabase.ts instead of direct fetch
+            console.log('Fetching brand data from database...');
+            const { data: brandData, error: brandError } = await supabase
+                .from('mylerzbrands')
+                .select('*')
+                .eq('id', brandId)
+                .single();
+
+            if (brandError) {
+                const errorMsg = `Failed to fetch brand data: ${brandError.message}`;
                 console.error(errorMsg);
                 await notifyProcessEvent('error', errorMsg);
                 return NextResponse.json({ error: errorMsg }, { status: 500 });
             }
-
-            const brandData = (await response2.json())[0];
 
             if (!brandData) {
                 const errorMsg = `Brand with ID ${brandId} not found`;
