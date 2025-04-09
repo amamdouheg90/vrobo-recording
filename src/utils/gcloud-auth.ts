@@ -2,52 +2,62 @@ import { Storage } from '@google-cloud/storage';
 
 // This function helps with Google Cloud authentication in different environments
 export function getGoogleCloudStorage(): Storage {
+    console.log('Initializing Google Cloud Storage...');
+    console.log('Project ID:', process.env.GOOGLE_CLOUD_PROJECT_ID);
+    console.log('Environment:', process.env.NODE_ENV);
+    console.log('Vercel Environment:', process.env.VERCEL_ENV);
+    console.log('Has Credentials JSON:', !!process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
+
     // If GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is set (Vercel deployment)
     if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON) {
         try {
             // Clean the JSON string before parsing
             let credentialsStr = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+            console.log('Raw credentials length:', credentialsStr.length);
 
             // Remove any surrounding quotes that might have been added by Vercel
             if (credentialsStr.startsWith('"') && credentialsStr.endsWith('"')) {
                 credentialsStr = credentialsStr.slice(1, -1);
+                console.log('Removed surrounding quotes');
             }
 
-            // First unescape any escaped quotes within the JSON content
-            credentialsStr = credentialsStr.replace(/\\"/g, '"');
-
-            // Handle escaped newlines properly - keep them as actual newlines
-            credentialsStr = credentialsStr.replace(/\\n/g, '\n');
-
-            // Handle any double-escaped characters that might have been introduced by environment variable handling
-            credentialsStr = credentialsStr.replace(/\\\\/g, '\\');
-
-            // Parse the cleaned JSON string
+            // Parse the JSON string directly
             const credentials = JSON.parse(credentialsStr);
+            console.log('Successfully parsed credentials JSON');
+            console.log('Credentials type:', credentials.type);
+            console.log('Project ID from credentials:', credentials.project_id);
 
+            // Create storage with explicit credentials
             return new Storage({
                 projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
-                credentials
+                credentials: {
+                    client_email: credentials.client_email,
+                    private_key: credentials.private_key,
+                    project_id: credentials.project_id,
+                }
             });
         } catch (error) {
+            console.error('Error initializing Google Cloud Storage:', error);
             if (error instanceof Error) {
-                console.error('Error parsing Google credentials JSON:', error);
-                console.error('Raw credentials string:', process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
-                console.error('Credential string format issue, using default authentication');
-
-                // During build time, return a dummy storage client to avoid build failures
-                if (process.env.NODE_ENV === 'production' && process.env.VERCEL_ENV === 'production') {
-                    return new Storage({
-                        projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'dummy-project'
-                    });
-                }
-
-                throw new Error(`Invalid Google Cloud credentials configuration: ${error.message}`);
+                console.error('Error details:', error.message);
+                console.error('Error stack:', error.stack);
             }
-            throw error; // Re-throw if it's not an Error instance
+
+            // During build time or if credentials fail, return a dummy client
+            if (process.env.NODE_ENV === 'production' && process.env.VERCEL_ENV === 'production') {
+                console.warn('Using default configuration in production due to credential error');
+                return new Storage({
+                    projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
+                });
+            }
+
+            throw new Error(`Failed to initialize Google Cloud Storage: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     }
 
-    // Default to Application Default Credentials (ADC) for local development
-    return new Storage();
+    // If no credentials in env var, try default credentials
+    console.log('No credentials in environment variable, using default authentication');
+    return new Storage({
+        projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
+    });
 } 

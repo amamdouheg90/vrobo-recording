@@ -7,7 +7,11 @@ import { supabase } from '@/utils/supabase';
 // Helper function to send process events via POST to the process-events endpoint
 async function notifyProcessEvent(step: string, error?: string) {
     try {
-        await fetch('/api/process-events', {
+        const baseUrl = process.env.VERCEL_URL
+            ? `https://${process.env.VERCEL_URL}`
+            : 'http://localhost:3000';
+
+        await fetch(`${baseUrl}/api/process-events`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -63,6 +67,13 @@ export async function POST(request: NextRequest) {
             const elevenlabsData = new FormData();
             elevenlabsData.append('audio', audioBlob);
             elevenlabsData.append('output_format', 'mp3_44100_128');
+            elevenlabsData.append('model_id', 'eleven_multilingual_sts_v2');
+
+            console.log('Sending to ElevenLabs with data:', {
+                audioSize: audioBlob.size,
+                audioType: audioBlob.type,
+                model: 'eleven_multilingual_sts_v2'
+            });
 
             // Call the Eleven Labs API
             const response = await axios.post(
@@ -71,11 +82,15 @@ export async function POST(request: NextRequest) {
                 {
                     headers: {
                         'xi-api-key': apiKey,
+                        'Accept': 'audio/mpeg',
+                        'Content-Type': 'multipart/form-data'
                     },
                     responseType: 'arraybuffer',
+                    maxBodyLength: Infinity,
                 }
             ).catch(error => {
                 let errorMessage = 'Unknown error';
+                console.error('Full error object:', error);
 
                 if (axios.isAxiosError(error) && error.response) {
                     // Try to extract detailed error from response
@@ -85,17 +100,32 @@ export async function POST(request: NextRequest) {
                             if (error.response.data instanceof ArrayBuffer) {
                                 const decoder = new TextDecoder();
                                 const dataString = decoder.decode(error.response.data);
-                                const parsedError = JSON.parse(dataString);
-                                errorMessage = parsedError.detail?.message || parsedError.message || String(parsedError);
+                                console.error('Error response data:', dataString);
+                                try {
+                                    const parsedError = JSON.parse(dataString);
+                                    errorMessage = parsedError.detail?.message || parsedError.message || String(parsedError);
+                                } catch {
+                                    // If JSON parsing fails, use the raw string
+                                    errorMessage = dataString;
+                                    console.error('Failed to parse error response as JSON:', dataString);
+                                }
                             } else {
                                 errorMessage = error.response.data.detail?.message || error.response.data.message || String(error.response.data);
                             }
-                        } catch {
+                        } catch (parseError) {
+                            console.error('Error parsing error response:', parseError);
                             errorMessage = `Status ${error.response.status}: ${error.response.statusText}`;
                         }
                     } else {
                         errorMessage = `Status ${error.response.status}: ${error.response.statusText}`;
                     }
+
+                    console.error('ElevenLabs API Error Details:', {
+                        status: error.response.status,
+                        statusText: error.response.statusText,
+                        headers: error.response.headers,
+                        errorMessage
+                    });
                 } else if (error instanceof Error) {
                     errorMessage = error.message;
                 }
@@ -108,8 +138,24 @@ export async function POST(request: NextRequest) {
             console.log('Eleven Labs API response received:', {
                 status: response.status,
                 statusText: response.statusText,
-                dataType: response.data ? typeof response.data : 'undefined'
+                headers: response.headers,
+                dataType: response.data ? typeof response.data : 'undefined',
+                dataLength: response.data ? response.data.byteLength : 0
             });
+
+            if (!response.data || response.data.byteLength === 0) {
+                throw new Error('Received empty response from ElevenLabs API');
+            }
+
+            // Verify the response is audio data
+            const contentType = response.headers['content-type'];
+            if (!contentType || !contentType.includes('audio')) {
+                console.error('Unexpected content type:', contentType);
+                const decoder = new TextDecoder();
+                const responseText = decoder.decode(response.data);
+                console.error('Response content:', responseText);
+                throw new Error(`Unexpected response type: ${contentType}`);
+            }
 
             // Convert the response to a Buffer
             const responseBuffer = Buffer.from(response.data);
@@ -151,7 +197,7 @@ export async function POST(request: NextRequest) {
             console.log('Uploading to Google Cloud Storage...');
             await notifyProcessEvent('uploading');
 
-            const filename = `mylerzbrand/${brandData.merchant_name} _${brandData.merchant_id}.mp3`;
+            const filename = `mylerzbrand/${brandData.merchant_name}_${brandData.merchant_id}.mp3`;
             console.log('Uploading to Google Cloud Storage with filename:', filename);
             console.log('Merchant name:', brandData.merchant_name);
             console.log('Merchant ID:', brandData.merchant_id);
@@ -160,19 +206,22 @@ export async function POST(request: NextRequest) {
                 merchantName: brandData.merchant_name,
                 merchantId: brandData.merchant_id
             });
-            console.log('Storage upload response:', uploadResponse);
+
+            console.log('File uploaded successfully');
+            console.log('Upload response URL:', uploadResponse);
 
             // Update the record URL in Supabase using merchant_id
-            const publicUrl = `https://storage.googleapis.com/${process.env.GOOGLE_CLOUD_BUCKET_NAME}/${filename}`;
-            console.log('Generated public URL:', publicUrl);
+            const publicUrl = uploadResponse;
+            console.log('Final URL for Supabase:', publicUrl);
 
             console.log('Updating database record...');
-            await notifyProcessEvent('updating_db');
+            await notifyProcessEvent('updating-db');
 
             let updateSuccess = false;
             try {
                 updateSuccess = await updateRecordUrl(brandData.merchant_id, publicUrl);
-                console.log('Successfully updated record URL in database:', updateSuccess);
+                console.log('Database update success:', updateSuccess, 'for merchant ID:', brandData.merchant_id);
+                console.log('URL saved to Supabase:', publicUrl);
             } catch (error) {
                 console.error('Error updating record URL:', error);
                 await notifyProcessEvent('error', 'Database update failed, but file was uploaded successfully');

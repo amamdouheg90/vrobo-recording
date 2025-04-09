@@ -1,44 +1,91 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MylerzBrand } from '@/utils/supabase';
-import RecordingSteps, { RecordingStep } from './RecordingSteps';
+
+// Add WebKit AudioContext type
+interface WebKitWindow extends Window {
+    webkitAudioContext: typeof AudioContext;
+}
+
+type RecordingStep = 'idle' | 'recording' | 'processing' | 'elevenlabs' | 'uploading' | 'updating_db' | 'preview' | 'completed' | 'error';
 
 interface VoiceRecorderProps {
     selectedBrand: MylerzBrand | null;
     onRecordingComplete: (url: string) => void;
+    onNext: () => void;
 }
 
-export default function VoiceRecorder({ selectedBrand, onRecordingComplete }: VoiceRecorderProps) {
+export default function VoiceRecorder({ selectedBrand, onRecordingComplete, onNext }: VoiceRecorderProps) {
     const [isRecording, setIsRecording] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [currentStep, setCurrentStep] = useState<RecordingStep>('idle');
     const [error, setError] = useState<string | null>(null);
-    const [audioUrl, setAudioUrl] = useState<string | null>(null);
-    const [eventSource, setEventSource] = useState<EventSource | null>(null);
+    const [recordingTime, setRecordingTime] = useState(0);
+    const [isPreparing, setIsPreparing] = useState(false);
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [isNewRecording, setIsNewRecording] = useState(false);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
     const recordButtonRef = useRef<HTMLButtonElement>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const timerRef = useRef<number | null>(null);
+    const recordingStartTimeRef = useRef<number>(0);
+    const audioPlayerRef = useRef<HTMLAudioElement>(null);
 
-    // Update audio URL when selected brand changes
+    const hasExistingRecording = !isNewRecording && selectedBrand?.record_url && selectedBrand.record_url.length > 0;
+
+    // Cleanup on unmount
     useEffect(() => {
-        if (selectedBrand?.record_url) {
-            setAudioUrl(selectedBrand.record_url);
-        } else {
-            setAudioUrl(null);
-        }
-
-        // Reset steps when brand changes
-        setCurrentStep('idle');
-        setError(null);
-    }, [selectedBrand]);
-
-    useEffect(() => {
-        // Clean up event source when component unmounts
         return () => {
-            if (eventSource) {
-                eventSource.close();
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
+            if (timerRef.current) {
+                window.clearInterval(timerRef.current);
             }
         };
-    }, [eventSource]);
+    }, []);
+
+    // Handle recording timer
+    useEffect(() => {
+        if (isRecording) {
+            recordingStartTimeRef.current = Date.now();
+            setRecordingTime(0);
+            timerRef.current = window.setInterval(() => {
+                setRecordingTime(prev => prev + 1);
+            }, 1000);
+        } else {
+            if (timerRef.current) {
+                window.clearInterval(timerRef.current);
+            }
+        }
+        return () => {
+            if (timerRef.current) {
+                window.clearInterval(timerRef.current);
+            }
+        };
+    }, [isRecording]);
+
+    const formatTime = (seconds: number) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    // Handle touch events for mobile
+    const handleTouchStart = async (e: React.TouchEvent) => {
+        e.preventDefault(); // Prevent default touch behavior
+        if (!isRecording && !isProcessing && !isPreparing) {
+            setIsPreparing(true);
+            // Wait 1 second before starting to record
+            setTimeout(async () => {
+                await startRecording();
+                setIsPreparing(false);
+            }, 1000);
+        } else if (isRecording) {
+            // Stop recording immediately
+            stopRecording();
+        }
+    };
 
     const startRecording = async () => {
         if (!selectedBrand) {
@@ -51,6 +98,15 @@ export default function VoiceRecorder({ selectedBrand, onRecordingComplete }: Vo
         setCurrentStep('recording');
 
         try {
+            // First ensure any existing streams are properly cleaned up
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => {
+                    track.stop();
+                });
+                streamRef.current = null;
+            }
+
+            // Request microphone access with specific constraints
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     channelCount: 1,
@@ -61,35 +117,211 @@ export default function VoiceRecorder({ selectedBrand, onRecordingComplete }: Vo
                 }
             });
 
-            // Try to use WAV format if supported
-            let mimeType = 'audio/wav';
-            if (!MediaRecorder.isTypeSupported(mimeType)) {
-                mimeType = 'audio/webm';
+            // Store the stream reference
+            streamRef.current = stream;
+
+            // Check if the stream is actually active
+            if (!stream.active) {
+                throw new Error('Microphone stream is not active');
             }
 
-            console.log('Using audio format:', mimeType);
+            // Verify we have audio tracks
+            if (stream.getAudioTracks().length === 0) {
+                throw new Error('No audio tracks available');
+            }
+
+            // Try different MIME types in order of preference
+            const mimeTypes = [
+                'audio/webm',
+                'audio/mp4',
+                'audio/ogg',
+                'audio/wav'
+            ];
+
+            let selectedMimeType = '';
+            for (const mimeType of mimeTypes) {
+                if (MediaRecorder.isTypeSupported(mimeType)) {
+                    selectedMimeType = mimeType;
+                    break;
+                }
+            }
+
+            if (!selectedMimeType) {
+                throw new Error('No supported audio MIME type found');
+            }
+
+            console.log('Using audio format:', selectedMimeType);
+            console.log('Stream active:', stream.active);
+            console.log('Audio tracks:', stream.getAudioTracks().length);
 
             const mediaRecorder = new MediaRecorder(stream, {
-                mimeType: mimeType,
+                mimeType: selectedMimeType,
             });
 
             mediaRecorderRef.current = mediaRecorder;
 
             mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
+                if (event.data && event.data.size > 0) {
+                    console.log('Received audio chunk:', event.data.size, 'bytes');
                     audioChunksRef.current.push(event.data);
+                }
+            };
+
+            const removeSilence = async (audioBlob: Blob): Promise<Blob> => {
+                return new Promise((resolve, reject) => {
+                    const AudioContextClass = (window as unknown as WebKitWindow).webkitAudioContext || window.AudioContext;
+                    const audioContext = new AudioContextClass();
+                    const reader = new FileReader();
+
+                    reader.onload = async () => {
+                        try {
+                            const audioBuffer = await audioContext.decodeAudioData(reader.result as ArrayBuffer);
+                            const channelData = audioBuffer.getChannelData(0); // Get the first channel
+                            const threshold = 0.01; // Adjust this value to change silence sensitivity
+
+                            // Find start index (first non-silent sample)
+                            let startIndex = 0;
+                            for (let i = 0; i < channelData.length; i++) {
+                                if (Math.abs(channelData[i]) > threshold) {
+                                    startIndex = Math.max(0, i - (audioContext.sampleRate * 0.1)); // Add 100ms buffer
+                                    break;
+                                }
+                            }
+
+                            // Find end index (last non-silent sample)
+                            let endIndex = channelData.length - 1;
+                            for (let i = channelData.length - 1; i >= 0; i--) {
+                                if (Math.abs(channelData[i]) > threshold) {
+                                    endIndex = Math.min(channelData.length - 1, i + (audioContext.sampleRate * 0.1)); // Add 100ms buffer
+                                    break;
+                                }
+                            }
+
+                            // If no non-silent parts found or very short audio, return original
+                            if (startIndex >= endIndex || (endIndex - startIndex) < audioContext.sampleRate * 0.5) {
+                                console.log('Audio too short or completely silent, using original');
+                                resolve(audioBlob);
+                                return;
+                            }
+
+                            // Create new buffer with trimmed audio
+                            const trimmedLength = endIndex - startIndex;
+                            const trimmedBuffer = audioContext.createBuffer(
+                                audioBuffer.numberOfChannels,
+                                trimmedLength,
+                                audioBuffer.sampleRate
+                            );
+
+                            // Copy the non-silent portion for each channel
+                            for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+                                const channelData = audioBuffer.getChannelData(channel);
+                                const newChannelData = trimmedBuffer.getChannelData(channel);
+                                for (let i = 0; i < trimmedLength; i++) {
+                                    newChannelData[i] = channelData[startIndex + i];
+                                }
+                            }
+
+                            // Convert buffer back to blob
+                            const offlineContext = new OfflineAudioContext({
+                                numberOfChannels: trimmedBuffer.numberOfChannels,
+                                length: trimmedBuffer.length,
+                                sampleRate: trimmedBuffer.sampleRate
+                            });
+
+                            const source = offlineContext.createBufferSource();
+                            source.buffer = trimmedBuffer;
+                            source.connect(offlineContext.destination);
+                            source.start();
+
+                            const renderedBuffer = await offlineContext.startRendering();
+
+                            // Convert to WAV format
+                            const wavBlob = await new Promise<Blob>((resolveBlob) => {
+                                const length = renderedBuffer.length * renderedBuffer.numberOfChannels * 2;
+                                const view = new DataView(new ArrayBuffer(44 + length));
+
+                                // Write WAV header
+                                writeString(view, 0, 'RIFF');
+                                view.setUint32(4, 36 + length, true);
+                                writeString(view, 8, 'WAVE');
+                                writeString(view, 12, 'fmt ');
+                                view.setUint32(16, 16, true);
+                                view.setUint16(20, 1, true);
+                                view.setUint16(22, renderedBuffer.numberOfChannels, true);
+                                view.setUint32(24, renderedBuffer.sampleRate, true);
+                                view.setUint32(28, renderedBuffer.sampleRate * renderedBuffer.numberOfChannels * 2, true);
+                                view.setUint16(32, renderedBuffer.numberOfChannels * 2, true);
+                                view.setUint16(34, 16, true);
+                                writeString(view, 36, 'data');
+                                view.setUint32(40, length, true);
+
+                                // Write audio data
+                                const volume = 0.8;
+                                let offset = 44;
+                                for (let i = 0; i < renderedBuffer.length; i++) {
+                                    for (let channel = 0; channel < renderedBuffer.numberOfChannels; channel++) {
+                                        const sample = Math.max(-1, Math.min(1, renderedBuffer.getChannelData(channel)[i])) * volume;
+                                        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                                        offset += 2;
+                                    }
+                                }
+
+                                resolveBlob(new Blob([view.buffer], { type: 'audio/wav' }));
+                            });
+
+                            resolve(wavBlob);
+                        } catch (error) {
+                            console.error('Error processing audio:', error);
+                            // If any error occurs, return the original blob
+                            resolve(audioBlob);
+                        } finally {
+                            audioContext.close();
+                        }
+                    };
+
+                    reader.onerror = (error) => reject(error);
+                    reader.readAsArrayBuffer(audioBlob);
+                });
+            };
+
+            // Helper function to write strings to DataView
+            const writeString = (view: DataView, offset: number, string: string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
                 }
             };
 
             mediaRecorder.onstop = async () => {
                 try {
-                    const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+                    // Ensure we have audio chunks
+                    if (audioChunksRef.current.length === 0) {
+                        throw new Error('No audio data recorded');
+                    }
+
+                    // Create the audio blob
+                    const audioBlob = new Blob(audioChunksRef.current, { type: selectedMimeType });
+
+                    // Verify the blob size
+                    if (audioBlob.size === 0) {
+                        throw new Error('Recorded audio file is empty');
+                    }
+
                     console.log('Recording completed:', {
-                        format: mimeType,
+                        format: selectedMimeType,
                         size: audioBlob.size,
                         chunks: audioChunksRef.current.length
                     });
-                    await processRecording(audioBlob);
+
+                    try {
+                        console.log('Removing silence from recording...');
+                        const trimmedBlob = await removeSilence(audioBlob);
+                        console.log('Silence removed. New size:', trimmedBlob.size);
+                        await processRecording(trimmedBlob);
+                    } catch (error) {
+                        console.error('Error removing silence:', error);
+                        // Fallback to original audio if silence removal fails
+                        await processRecording(audioBlob);
+                    }
                 } catch (error) {
                     console.error('Error processing recording:', error);
                     setError('Failed to process recording. Please try again.');
@@ -98,66 +330,65 @@ export default function VoiceRecorder({ selectedBrand, onRecordingComplete }: Vo
                 }
             };
 
-            mediaRecorder.start(1000); // Collect data in 1-second chunks
+            mediaRecorder.start(100); // Collect data in smaller chunks (100ms)
             setIsRecording(true);
         } catch (error) {
             console.error('Error starting recording:', error);
-            setError('Could not start recording. Please check microphone permissions.');
+            // More specific error messages based on the error
+            if (error instanceof DOMException) {
+                if (error.name === 'NotAllowedError') {
+                    setError('Microphone access was denied. Please allow microphone access and try again.');
+                } else if (error.name === 'NotFoundError') {
+                    setError('No microphone found. Please ensure your device has a working microphone.');
+                } else {
+                    setError(`Microphone error: ${error.message}. Please reload and try again.`);
+                }
+            } else {
+                setError('Could not start recording. Please reload the page and try again.');
+            }
             setCurrentStep('error');
+
+            // Cleanup any partial stream
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+                streamRef.current = null;
+            }
         }
     };
 
     const stopRecording = () => {
         if (mediaRecorderRef.current && isRecording) {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
-            setCurrentStep('processing');
-
-            // Stop all tracks in the stream
-            mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
-        }
-    };
-
-    // Handle mouse events for "press-to-record" functionality
-    const handleMouseDown = async () => {
-        if (!isRecording && !isProcessing) {
-            await startRecording();
-        }
-    };
-
-    const handleMouseUp = () => {
-        if (isRecording) {
-            stopRecording();
-        }
-    };
-
-    // Handle touch events for mobile
-    const handleTouchStart = async () => {
-        if (!isRecording && !isProcessing) {
-            await startRecording();
-        }
-    };
-
-    const handleTouchEnd = () => {
-        if (isRecording) {
-            stopRecording();
-        }
-    };
-
-    // Clean up recording if component unmounts while recording
-    useEffect(() => {
-        return () => {
-            if (mediaRecorderRef.current && isRecording) {
-                mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+            try {
+                // No minimum duration check here since we already checked in handleTouchStart
+                // Request final chunk of data
+                mediaRecorderRef.current.requestData();
+                // Stop the recorder
+                mediaRecorderRef.current.stop();
+                setIsRecording(false);
+                setCurrentStep('processing');
+            } catch (error) {
+                console.error('Error stopping recording:', error);
+                setError('Failed to stop recording properly. Please reload the page.');
+                setCurrentStep('error');
             }
-        };
-    }, [isRecording]);
+
+            // Always cleanup the stream
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => {
+                    track.stop();
+                    track.enabled = false;
+                });
+                streamRef.current = null;
+            }
+        }
+    };
 
     const processRecording = async (audioBlob: Blob) => {
         if (!selectedBrand) return;
 
         setIsProcessing(true);
         setError(null);
+        setCurrentStep('processing');
 
         try {
             console.log('Processing recording:', {
@@ -165,186 +396,258 @@ export default function VoiceRecorder({ selectedBrand, onRecordingComplete }: Vo
                 size: audioBlob.size
             });
 
-            // Connect to the process-events SSE endpoint
-            console.log('Connecting to process-events endpoint');
-            const newEventSource = new EventSource('/api/process-events');
-            setEventSource(newEventSource);
-
-            // Set up event handlers for SSE
-            newEventSource.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    console.log('Process event received:', data);
-
-                    if (data.connected) {
-                        console.log('Connected to SSE with client ID:', data.clientId);
-                    }
-
-                    if (data.step) {
-                        console.log('Updating step to:', data.step);
-                        setCurrentStep(data.step as RecordingStep);
-
-                        if (data.step === 'completed') {
-                            console.log('Processing completed, closing SSE connection');
-                            newEventSource.close();
-                            setEventSource(null);
-                        }
-                    }
-
-                    if (data.error) {
-                        console.error('Error from SSE:', data.error);
-                        setError(data.error);
-                        setCurrentStep('error');
-                        newEventSource.close();
-                        setEventSource(null);
-                    }
-                } catch (err) {
-                    console.error('Error parsing event data:', err, event.data);
-                }
-            };
-
-            newEventSource.onerror = (err) => {
-                console.error('EventSource error:', err);
-                setError('Connection to server lost. Please try again.');
-                setCurrentStep('error');
-                newEventSource.close();
-                setEventSource(null);
-            };
-
-            // Prepare and send the form data
             const formData = new FormData();
             formData.append('audio', audioBlob);
             formData.append('brandId', selectedBrand.id.toString());
 
-            // Send the recording to the API
             console.log('Sending recording to voice-clone API');
+            setCurrentStep('elevenlabs');
+
             const response = await fetch('/api/voice-clone', {
                 method: 'POST',
                 body: formData,
             });
 
-            // Handle API response
             if (!response.ok) {
                 const errorData = await response.json();
-                console.error('API Error:', errorData);
                 throw new Error(errorData.error || 'Failed to process recording');
             }
 
             const data = await response.json();
-            console.log('API response received:', data);
 
-            // Update audio URL and notify parent
-            setAudioUrl(data.url);
-            onRecordingComplete(data.url);
+            let finalUrl = '';
+            if (data.url) finalUrl = data.url;
+            else if (data.gcsUrl) finalUrl = data.gcsUrl;
+            else if (data.gcUrl) finalUrl = data.gcUrl;
+            else if (data.storageUrl) finalUrl = data.storageUrl;
+            else if (data.record_url) finalUrl = data.record_url;
+            else if (data.data && typeof data.data === 'object') {
+                if (data.data.url) finalUrl = data.data.url;
+                else if (data.data.gcsUrl) finalUrl = data.data.gcsUrl;
+                else if (data.data.record_url) finalUrl = data.data.record_url;
+            }
 
-            // Note: We don't need to set the step to completed here as the SSE will do that
+            if (finalUrl) {
+                try {
+                    const url = new URL(finalUrl);
+                    finalUrl = url.toString();
+                } catch {
+                    finalUrl = finalUrl.replace(/ /g, '%20');
+                    try {
+                        const url = new URL(finalUrl);
+                        finalUrl = url.toString();
+                    } catch {
+                        console.error('Still invalid URL after encoding:', finalUrl);
+                    }
+                }
 
+                // Save the recording immediately
+                onRecordingComplete(finalUrl);
+
+                // Then show preview
+                setPreviewUrl(finalUrl);
+                setCurrentStep('preview');
+                setIsProcessing(false);
+            } else {
+                throw new Error('No URL received from the API');
+            }
         } catch (error) {
             console.error('Error processing recording:', error);
             setError(error instanceof Error ? error.message : 'Failed to process recording. Please try again.');
             setCurrentStep('error');
-
-            // Close event source if still open
-            if (eventSource) {
-                eventSource.close();
-                setEventSource(null);
-            }
-        } finally {
             setIsProcessing(false);
         }
     };
 
+    // Add effect to auto-play preview when it's ready
+    useEffect(() => {
+        if (currentStep === 'preview' && previewUrl && audioPlayerRef.current) {
+            audioPlayerRef.current.play().catch(err => {
+                console.error('Error auto-playing preview:', err);
+            });
+        }
+    }, [currentStep, previewUrl]);
+
+    // Reset states when merchant changes
+    useEffect(() => {
+        setIsRecording(false);
+        setIsProcessing(false);
+        setCurrentStep('idle');
+        setError(null);
+        setIsNewRecording(false);
+        audioChunksRef.current = [];
+
+        if (timerRef.current) {
+            window.clearInterval(timerRef.current);
+        }
+    }, [selectedBrand]);
+
     return (
-        <div className="mt-6 w-full">
-            <h2 className="text-xl font-semibold mb-4">Voice Recorder</h2>
-
+        <div className="w-full">
             {!selectedBrand ? (
-                <p className="text-red-500">Please select a brand first</p>
-            ) : (
+                <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                    <p className="text-yellow-700">Please select a brand to start recording</p>
+                </div>
+            ) : hasExistingRecording ? (
                 <div className="flex flex-col items-center w-full">
-                    <p className="mb-4">
-                        Selected Brand: <span className="font-medium">{selectedBrand.merchant_name}</span>
-                    </p>
-
-                    <div className="flex flex-col items-center w-full max-w-sm">
-                        {/* Recording Steps Progress */}
-                        {currentStep !== 'idle' && (
-                            <RecordingSteps currentStep={currentStep} error={error || undefined} />
-                        )}
-
-                        {/* Microphone Button */}
-                        <button
-                            ref={recordButtonRef}
-                            onMouseDown={handleMouseDown}
-                            onMouseUp={handleMouseUp}
-                            onMouseLeave={handleMouseUp}
-                            onTouchStart={handleTouchStart}
-                            onTouchEnd={handleTouchEnd}
-                            disabled={isProcessing || currentStep === 'processing' || currentStep === 'elevenlabs' || currentStep === 'uploading' || currentStep === 'updating_db'}
-                            className={`
-                                relative flex flex-col items-center justify-center
-                                w-24 h-24 rounded-full 
-                                shadow-lg mb-4 
-                                active:shadow-inner
-                                transition-all duration-200
-                                ${isProcessing || currentStep !== 'idle' && currentStep !== 'recording' && currentStep !== 'completed' && currentStep !== 'error'
-                                    ? 'bg-gray-300 cursor-not-allowed'
-                                    : isRecording
-                                        ? 'bg-red-600 animate-pulse scale-110'
-                                        : 'bg-red-500 hover:bg-red-600'
-                                }
-                            `}
-                            aria-label="Record audio"
-                        >
-                            {/* Microphone Icon */}
-                            <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                viewBox="0 0 24 24"
-                                fill="white"
-                                className={`w-10 h-10 ${isRecording ? 'animate-pulse' : ''}`}
-                            >
-                                <path d="M12 16c2.206 0 4-1.794 4-4V6c0-2.217-1.785-4.021-3.979-4.021a.933.933 0 0 0-.209.025A4.006 4.006 0 0 0 8 6v6c0 2.206 1.794 4 4 4zm-6 0v-2c0-.553-.447-1-1-1s-1 .447-1 1v2c0 3.309 2.691 6 6 6h2c3.309 0 6-2.691 6-6v-2c0-.553-.447-1-1-1s-1 .447-1 1v2c0 2.206-1.794 4-4 4h-2c-2.206 0-4-1.794-4-4z" />
-                            </svg>
-
-                            {/* Recording Indicator Ripple Effect */}
-                            {isRecording && (
-                                <div className="absolute w-full h-full rounded-full animate-ping-slow bg-red-600 opacity-30"></div>
-                            )}
-                        </button>
-
-                        {/* Status Text */}
-                        <p className={`text-center font-medium ${isRecording ? 'text-red-600' : 'text-gray-600'}`}>
-                            {currentStep === 'processing' || currentStep === 'elevenlabs' || currentStep === 'uploading' || currentStep === 'updating_db'
-                                ? 'Processing...'
-                                : isRecording
-                                    ? 'Release to stop recording'
-                                    : 'Press and hold to record'}
+                    <div className="w-full mb-4 p-3 bg-blue-50 rounded-lg border border-blue-100">
+                        <p className="text-blue-800 font-medium text-center">
+                            {selectedBrand.merchant_name}
                         </p>
-
-                        {error && currentStep !== 'error' && (
-                            <p className="mt-4 text-red-500 text-center">{error}</p>
-                        )}
                     </div>
 
-                    {audioUrl && (
-                        <div className="mt-8 w-full max-w-md">
-                            <h3 className="text-lg font-medium mb-2">Brand Recording</h3>
-                            <div className="bg-gray-100 p-4 rounded-md shadow">
-                                <audio
-                                    src={audioUrl}
-                                    controls
-                                    className="w-full"
-                                />
-                                <div className="mt-3 pt-3 border-t border-gray-200">
-                                    <p className="text-sm text-gray-600 break-all">
-                                        <a href={audioUrl} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">
-                                            {audioUrl}
-                                        </a>
-                                    </p>
-                                </div>
+                    <div className="w-full max-w-md space-y-4">
+                        <div className="p-4 bg-white rounded-lg shadow">
+                            <p className="text-gray-600 mb-3 text-center">Existing Recording</p>
+                            <audio
+                                src={selectedBrand.record_url || undefined}
+                                controls
+                                className="w-full mb-4"
+                            />
+                            <div className="flex flex-col gap-2">
+                                <button
+                                    onClick={() => {
+                                        setIsNewRecording(true);
+                                        setCurrentStep('idle');
+                                        setError(null);
+                                    }}
+                                    className="w-full py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                                >
+                                    Record New Audio
+                                </button>
+                                <button
+                                    onClick={onNext}
+                                    className="w-full py-2 px-4 bg-green-500 text-white rounded hover:bg-green-600 transition-colors flex items-center justify-center gap-2"
+                                >
+                                    Next Brand
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                    </svg>
+                                </button>
                             </div>
                         </div>
-                    )}
+                    </div>
+                </div>
+            ) : (
+                <div className="flex flex-col items-center w-full">
+                    <div className="w-full mb-4 p-3 bg-blue-50 rounded-lg border border-blue-100">
+                        <p className="text-blue-800 font-medium text-center">
+                            {selectedBrand.merchant_name}
+                        </p>
+                    </div>
+
+                    <div className="flex flex-col items-center w-full">
+                        {/* Recording Timer */}
+                        <div className="mb-4 text-xl font-semibold">
+                            {isRecording && (
+                                <span className="text-red-600">{formatTime(recordingTime)}</span>
+                            )}
+                        </div>
+
+                        {currentStep === 'preview' && previewUrl ? (
+                            <div className="w-full max-w-md space-y-4">
+                                <div className="p-4 bg-white rounded-lg shadow">
+                                    <p className="text-gray-600 mb-3 text-center">Recording Preview</p>
+                                    <audio
+                                        ref={audioPlayerRef}
+                                        src={previewUrl}
+                                        controls
+                                        className="w-full mb-4"
+                                    />
+                                    <div className="flex flex-col gap-2">
+                                        <p className="text-sm text-gray-500 text-center">
+                                            Recording has been saved
+                                        </p>
+                                        <button
+                                            onClick={onNext}
+                                            className="w-full py-2 px-4 bg-green-500 text-white rounded hover:bg-green-600 transition-colors flex items-center justify-center gap-2"
+                                        >
+                                            Next Brand
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                                {/* Microphone Button */}
+                                <div
+                                    className="relative my-4 touch-none select-none"
+                                    style={{ touchAction: 'none' }}
+                                >
+                                    <button
+                                        ref={recordButtonRef}
+                                        onTouchStart={handleTouchStart}
+                                        disabled={isProcessing || currentStep === 'processing' || currentStep === 'elevenlabs' || currentStep === 'uploading' || currentStep === 'updating_db'}
+                                        className={`
+                                        relative flex flex-col items-center justify-center
+                                            w-40 h-40 rounded-full 
+                                            shadow-lg
+                                        active:shadow-inner
+                                            transition-all duration-200 ease-in-out
+                                            ${isProcessing || (currentStep !== 'idle' && currentStep !== 'recording' && currentStep !== 'completed' && currentStep !== 'error')
+                                                ? 'bg-gray-300 cursor-not-allowed'
+                                                : isRecording
+                                                    ? 'bg-red-600 scale-105 shadow-red-200'
+                                                    : isPreparing
+                                                        ? 'bg-orange-500'
+                                                        : 'bg-red-500'
+                                            }
+                                        focus:outline-none focus:ring-4 focus:ring-red-200
+                                        touch-none select-none
+                                    `}
+                                        style={{ touchAction: 'none' }}
+                                        aria-label="Record audio"
+                                    >
+                                        {/* Microphone Icon */}
+                                        <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            viewBox="0 0 24 24"
+                                            fill="white"
+                                            className={`w-20 h-20 ${isRecording ? 'animate-pulse' : ''}`}
+                                        >
+                                            <path d="M12 16c2.206 0 4-1.794 4-4V6c0-2.217-1.785-4.021-3.979-4.021a.933.933 0 0 0-.209.025A4.006 4.006 0 0 0 8 6v6c0 2.206 1.794 4 4 4zm-6 0v-2c0-.553-.447-1-1-1s-1 .447-1 1v2c0 3.309 2.691 6 6 6h2c3.309 0 6-2.691 6-6v-2c0-.553-.447-1-1-1s-1 .447-1 1v2c0 2.206-1.794 4-4 4h-2c-2.206 0-4-1.794-4-4z" />
+                                        </svg>
+
+                                        {/* Recording Indicator */}
+                                        {isRecording && (
+                                            <div className="absolute w-full h-full rounded-full animate-ping-slow bg-red-600 opacity-30"></div>
+                                        )}
+                                    </button>
+
+                                    {/* Recording Status */}
+                                    {isRecording && (
+                                        <div className="absolute -bottom-10 left-1/2 transform -translate-x-1/2 bg-red-100 px-4 py-2 rounded-full">
+                                            <span className="text-red-600 font-medium animate-pulse">Recording...</span>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Status Text */}
+                                <p className={`text-center font-medium mt-12 text-lg ${isRecording ? 'text-red-600' :
+                                    isPreparing ? 'text-orange-600' :
+                                        currentStep === 'processing' || currentStep === 'elevenlabs' ? 'text-blue-600' :
+                                            'text-gray-600'
+                                    }`}>
+                                    {currentStep === 'processing' || currentStep === 'elevenlabs'
+                                        ? 'Processing your recording...'
+                                        : isRecording
+                                            ? 'Tap to stop recording'
+                                            : isPreparing
+                                                ? 'Preparing to record...'
+                                                : 'Tap to start recording'}
+                                </p>
+                            </>
+                        )}
+
+                        {error && (
+                            <div className="mt-4 p-3 bg-red-50 border border-red-100 rounded-lg w-full">
+                                <p className="text-red-600 text-center">{error}</p>
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
         </div>

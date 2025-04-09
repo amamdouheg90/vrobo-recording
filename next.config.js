@@ -4,7 +4,7 @@ const nextConfig = {
     output: 'standalone',
     // Properly handle the @google-cloud/storage package
     experimental: {
-        serverComponentsExternalPackages: ['@google-cloud/storage']
+        serverExternalPackages: ['@google-cloud/storage']
     },
     // Allow environment variables to be accessed in the build
     env: {

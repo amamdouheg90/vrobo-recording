@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 interface ServiceStatus {
     name: string;
@@ -13,11 +13,15 @@ export default function ServiceStatus() {
         { name: 'Google Cloud', status: 'checking' }
     ]);
 
-    useEffect(() => {
-        checkServices();
-    }, []);
+    const updateServiceStatus = (name: string, status: 'checking' | 'success' | 'error', message?: string) => {
+        setServices(prevServices =>
+            prevServices.map(service =>
+                service.name === name ? { ...service, status, message } : service
+            )
+        );
+    };
 
-    const checkServices = async () => {
+    const checkServices = useCallback(async () => {
         // Check Supabase
         try {
             const supResponse = await fetch('/api/check/supabase');
@@ -59,15 +63,11 @@ export default function ServiceStatus() {
             const errorMessage = err instanceof Error ? err.message : 'Connection failed';
             updateServiceStatus('Google Cloud', 'error', errorMessage);
         }
-    };
+    }, []);
 
-    const updateServiceStatus = (name: string, status: 'checking' | 'success' | 'error', message?: string) => {
-        setServices(currentServices =>
-            currentServices.map(service =>
-                service.name === name ? { ...service, status, message } : service
-            )
-        );
-    };
+    useEffect(() => {
+        checkServices();
+    }, [checkServices]);
 
     return (
         <div className="w-full mb-8 bg-white rounded-lg shadow-md overflow-hidden">
@@ -79,12 +79,12 @@ export default function ServiceStatus() {
                     {services.map((service) => (
                         <div key={service.name} className="flex items-center p-3 border rounded-md">
                             <div className={`w-3 h-3 rounded-full mr-3 ${service.status === 'checking' ? 'bg-yellow-400' :
-                                    service.status === 'success' ? 'bg-green-500' : 'bg-red-500'
+                                service.status === 'success' ? 'bg-green-500' : 'bg-red-500'
                                 }`}></div>
                             <div>
                                 <p className="font-medium">{service.name}</p>
                                 <p className={`text-sm ${service.status === 'checking' ? 'text-yellow-600' :
-                                        service.status === 'success' ? 'text-green-600' : 'text-red-600'
+                                    service.status === 'success' ? 'text-green-600' : 'text-red-600'
                                     }`}>
                                     {service.status === 'checking' ? 'Checking...' :
                                         service.status === 'success' ? 'Connected' :
